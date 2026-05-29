@@ -1,0 +1,1 @@
+PARAMS = type("Params", (), {"scale": 1.0})()
