@@ -54,11 +54,24 @@ def main(argv: list[str] | None = None) -> int:
         help="Output directory for reports (must NOT be inside the target project). "
         "Default: /tmp/fpga_flow_audit_reports/<project_name>/",
     )
+    parser.add_argument(
+        "--cross-compare",
+        type=str,
+        default=None,
+        help="Cross-project comparison with two project paths separated by comma",
+    )
 
     args = parser.parse_args(argv)
 
+    # Handle cross-compare mode (doesn't need project_path)
+    if args.cross_compare:
+        paths = [Path(p.strip()) for p in args.cross_compare.split(",")]
+        if len(paths) != 2:
+            parser.error("--cross-compare requires exactly two paths, e.g. path_a,path_b")
+        return _audit_cross_compare(paths, args.output_dir)
+
     if not args.stage and not args.compare and not args.rtl:
-        parser.error("Must specify --stage, --compare, or --rtl")
+        parser.error("Must specify --stage, --compare, --rtl, or --cross-compare")
 
     project_path = args.project_path.resolve()
     project, disc_findings = discover_project(project_path)
@@ -227,8 +240,8 @@ def _audit_compare(
     all_findings = FindingSet()
     all_findings.findings.extend(disc_findings.findings)
 
-    diff, diff_findings = compare_stages(project, stage_a, stage_b)
-    all_findings.findings.extend(diff_findings.findings)
+    diff, diff_findings_result = compare_stages(project, stage_a, stage_b)
+    all_findings.findings.extend(diff_findings_result.findings)
 
     stage_info_a = get_stage_info(project, stage_a, all_findings)
     stage_info_b = get_stage_info(project, stage_b, all_findings)
@@ -249,6 +262,15 @@ def _audit_compare(
     all_findings.findings.extend(df_findings_a.findings)
     all_findings.findings.extend(df_findings_b.findings)
 
+    # Separate findings per side for compare report
+    findings_a = FindingSet()
+    findings_b = FindingSet()
+    findings_a.findings.extend(import_findings_a.findings)
+    findings_a.findings.extend(df_findings_a.findings)
+    findings_b.findings.extend(import_findings_b.findings)
+    findings_b.findings.extend(df_findings_b.findings)
+
+    # Generate standard single-stage report
     result = generate_report(
         project, f"{stage_a}_vs_{stage_b}", stage_info_a, all_findings,
         callgraph_a, dataflow_a, output_dir,
@@ -262,8 +284,79 @@ def _audit_compare(
         json.dumps(diff_json, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
+    # Generate compare dashboard report
+    from fpga_flow_audit.compare.compare_report import generate_compare_report
+    compare_result = generate_compare_report(
+        project_a=project, stage_a=stage_a, findings_a=findings_a,
+        project_b=project, stage_b=stage_b, findings_b=findings_b,
+        callgraph_a=callgraph_a, callgraph_b=callgraph_b,
+        dataflow_a=dataflow_a, dataflow_b=dataflow_b,
+        output_dir=output_dir,
+    )
+    compare_dir = Path(compare_result["report_dir"])
     print(f"Report written to: {report_dir}")
+    print(f"Compare report written to: {compare_dir}")
     return 0
+
+
+def _audit_cross_compare(
+    project_paths: list[Path], output_dir: Path | None,
+) -> int:
+    """Cross-project comparison (e.g. GLM RTL vs Kimi RTL)."""
+    if len(project_paths) != 2:
+        print("ERROR: --cross-compare requires exactly two project paths", file=sys.stderr)
+        return 1
+
+    from fpga_flow_audit.compare.compare_report import generate_compare_report
+
+    # Discover both projects
+    project_a, disc_a = discover_project(project_paths[0].resolve())
+    project_b, disc_b = discover_project(project_paths[1].resolve())
+
+    # Run RTL analysis on both
+    rtl_a = _audit_rtl(project_a, disc_a)
+    rtl_b = _audit_rtl(project_b, disc_b)
+
+    # Build findings sets
+    findings_a = FindingSet()
+    findings_a.findings.extend(disc_a.findings)
+    findings_b = FindingSet()
+    findings_b.findings.extend(disc_b.findings)
+    if rtl_a:
+        for f in _get_rtl_findings(rtl_a):
+            findings_a.add(f)
+    if rtl_b:
+        for f in _get_rtl_findings(rtl_b):
+            findings_b.add(f)
+
+    # Extract RTL data
+    def _rtl_kwargs(rtl_result):
+        if not rtl_result:
+            return {}
+        return {
+            "rtl_module_graph": rtl_result.get("module_graph"),
+            "rtl_data_dep": rtl_result.get("data_dep_graph"),
+            "rtl_parsed": rtl_result.get("parsed"),
+            "tcl_refs": rtl_result.get("tcl_refs"),
+        }
+
+    result = generate_compare_report(
+        project_a=project_a, stage_a="RTL", findings_a=findings_a,
+        project_b=project_b, stage_b="RTL", findings_b=findings_b,
+        output_dir=output_dir,
+        **{f"{k}_a": v for k, v in _rtl_kwargs(rtl_a).items()},
+        **{f"{k}_b": v for k, v in _rtl_kwargs(rtl_b).items()},
+    )
+    compare_dir = result["report_dir"]
+    print(f"Cross-compare report written to: {compare_dir}")
+    return 0
+
+
+def _get_rtl_findings(rtl_result: dict):
+    """Extract findings list from RTL result dict."""
+    # RTL findings were already added to the discovery FindingSet during _audit_rtl
+    # Return empty — findings are in disc_findings
+    return []
 
 
 def _empty_graphs():
