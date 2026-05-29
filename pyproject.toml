@@ -14,3 +14,15 @@ fpga-flow-audit = "fpga_flow_audit.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--cov-config=pyproject.toml"
+
+[tool.coverage.run]
+source = ["fpga_flow_audit"]
+data_file = "/tmp/fpga_flow_audit_coverage/.coverage"
+omit = [
+    "*/fpga_project_*/*",
+    "*/tests/*",
+]
+
+[tool.coverage.html]
+directory = "/tmp/fpga_flow_audit_coverage/html"
